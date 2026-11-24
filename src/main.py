@@ -117,14 +117,14 @@ async def scrape_dom_fallback(page, artist_id: str, currency: str, category_name
 
 async def collect_from_page(page, url: str, artist_id: str, currency: str, captured_api_jsons: list, products_map: dict, category_name: str = ""):
     captured_api_jsons.clear()
-    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(3000)
+    await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+    await page.wait_for_timeout(2500)
 
-    for _ in range(4):
+    for _ in range(3):
         await page.evaluate(
             "() => { const h = document.documentElement?.scrollHeight || document.body?.scrollHeight || 0; if (h > 0) window.scrollTo(0, h); }"
         )
-        await page.wait_for_timeout(1000)
+        await page.wait_for_timeout(900)
 
     html_text = await page.content()
     final_url = page.url
@@ -151,6 +151,7 @@ async def collect_from_page(page, url: str, artist_id: str, currency: str, captu
 async def run_browser_scrape(target_url: str, artist_id: str, currency: str, max_items: int, include_details: bool, proxy_url: str | None):
     captured_api_jsons = []
     products_map = {}
+    pushed_count = 0
 
     async with async_playwright() as p:
         launch_opts = {"headless": True, "args": ["--disable-blink-features=AutomationControlled"]}
@@ -178,11 +179,9 @@ async def run_browser_scrape(target_url: str, artist_id: str, currency: str, max
 
         page.on("response", handle_response)
 
-        # 1. 메인 아티스트 페이지 수집
         await collect_from_page(page, target_url, artist_id, currency, captured_api_jsons, products_map, "Featured")
         Actor.log.info(f"🏠 메인 페이지 상품 수집: {len(products_map)}개")
 
-        # 2. 카테고리 링크들(/categories/...) 자동 발견 후 추가 수집
         if (max_items == 0 or len(products_map) < max_items) and "/categories/" not in target_url:
             cat_links = await page.query_selector_all('a[href*="/categories/"]')
             cat_urls = []
@@ -192,26 +191,32 @@ async def run_browser_scrape(target_url: str, artist_id: str, currency: str, max
                 full_cat = urljoin("https://shop.weverse.io", href).split("?")[0]
                 if f"/artists/{artist_id}/categories/" in full_cat and full_cat not in seen_cat:
                     seen_cat.add(full_cat)
-                    cat_name = (await el.inner_text() or "").strip()
-                    cat_urls.append((full_cat, cat_name))
+                    raw_text = (await el.inner_text() or "").strip()
+                    first_line = raw_text.splitlines()[0].strip() if raw_text else "Category"
+                    clean_cat = re.sub(r"\s+", " ", first_line)[:50]
+                    cat_urls.append((full_cat, clean_cat))
 
-            Actor.log.info(f"📂 발견된 카테고리 탭 {len(cat_urls)}개 탐색 시작...")
+            Actor.log.info(f"📂 카테고리 탭 {len(cat_urls)}개 발견, 탐색 시작...")
             for cat_url, cat_name in cat_urls[:12]:
                 if max_items > 0 and len(products_map) >= max_items:
                     break
                 await collect_from_page(page, cat_url, artist_id, currency, captured_api_jsons, products_map, cat_name)
-                Actor.log.info(f"   └ [{cat_name or 'Category'}] 누적 상품: {len(products_map)}개")
+                Actor.log.info(f"   └ [{cat_name}] 누적 상품: {len(products_map)}개")
 
         results = list(products_map.values())
         if max_items > 0:
             results = results[:max_items]
 
-        # 3. 상세 페이지 보강 (선택 사항)
-        if include_details and results:
+        if not results:
+            await browser.close()
+            return 0
+
+        if include_details:
+            Actor.log.info(f"🔎 상세 페이지 보강 시작 ({len(results)}개)...")
             for idx, item in enumerate(results):
                 try:
-                    await page.goto(item["productUrl"], wait_until="domcontentloaded", timeout=25000)
-                    await page.wait_for_timeout(600)
+                    await page.goto(item["productUrl"], wait_until="domcontentloaded", timeout=15000)
+                    await page.wait_for_timeout(400)
                     d_html = await page.content()
                     d_json = extract_next_data(d_html)
                     for dr in find_products_in_json(d_json):
@@ -222,8 +227,16 @@ async def run_browser_scrape(target_url: str, artist_id: str, currency: str, max
                 except Exception as e:
                     Actor.log.warning(f"상세 건너뜀 ({item['saleId']}): {e}")
 
+                await Actor.push_data(item)
+                pushed_count += 1
+                if (idx + 1) % 10 == 0:
+                    Actor.log.info(f"   ✅ 상세 진행률: {idx + 1}/{len(results)}개 저장 완료")
+        else:
+            await Actor.push_data(results)
+            pushed_count = len(results)
+
         await browser.close()
-        return results
+        return pushed_count
 
 
 async def main() -> None:
@@ -242,22 +255,20 @@ async def main() -> None:
             artist_id = m_art.group(1)
 
         Actor.log.info(f"🚀 Scraping Weverse Shop: {target_url}")
-        results = await run_browser_scrape(target_url, artist_id, currency, max_items, include_details, None)
+        pushed_count = await run_browser_scrape(target_url, artist_id, currency, max_items, include_details, None)
 
-        if not results:
+        if pushed_count == 0:
             Actor.log.info("🔄 직접 접속 결과 0건 → Apify 프록시로 재시도합니다...")
             proxy_config = await Actor.create_proxy_configuration()
             proxy_url = await proxy_config.new_url() if proxy_config else None
             if proxy_url:
-                results = await run_browser_scrape(target_url, artist_id, currency, max_items, include_details, proxy_url)
+                pushed_count = await run_browser_scrape(target_url, artist_id, currency, max_items, include_details, proxy_url)
 
-        if results:
-            await Actor.push_data(results)
-            # Apify Pay-Per-Event 과금 이벤트 발생 (Publishing 탭에서 product-scraped 가격 설정 시 자동 정산!)
+        if pushed_count > 0:
             try:
-                await Actor.charge(event_name="product-scraped", count=len(results))
+                await Actor.charge(event_name="product-scraped", count=pushed_count)
             except Exception as charge_err:
                 Actor.log.info(f"ℹ️ PPE charge info (무료 테스트 중이면 정상): {charge_err}")
-            Actor.log.info(f"🎉 완료! 총 {len(results)}개 상품 추출 성공.")
+            Actor.log.info(f"🎉 완료! 총 {pushed_count}개 상품 저장 성공.")
         else:
             Actor.log.warning("❌ 상품을 찾지 못했습니다.")

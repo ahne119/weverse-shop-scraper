@@ -54,10 +54,10 @@
       "maximum": 500
     },
     "includeProductDetails": {
-      "title": "Fetch Detailed Stock & Badges",
+      "title": "Fetch Detailed Stock & Badges (Slower)",
       "type": "boolean",
-      "description": "Visit individual product pages for exact stock status, badges, and description (slower, uses more compute).",
-      "default": true
+      "description": "Visit individual product pages for extra badges/details (much slower; off by default since prices and sold-out status are already included).",
+      "default": false
     }
   }
 }
