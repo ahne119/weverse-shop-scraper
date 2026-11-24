@@ -8,7 +8,6 @@ from playwright.async_api import async_playwright
 
 
 def extract_next_data(html_text: str) -> dict:
-    """Next.js SSR 페이지 내부의 __NEXT_DATA__ JSON 추출"""
     soup = BeautifulSoup(html_text, "html.parser")
     script = soup.find("script", id="__NEXT_DATA__")
     if script and script.string:
@@ -20,15 +19,14 @@ def extract_next_data(html_text: str) -> dict:
 
 
 def find_products_in_json(obj, found=None):
-    """중첩된 Next.js JSON 트리에서 상품(saleId/name/price) 객체 재귀 탐색"""
+    """중첩된 JSON(SSR 또는 API 응답)에서 상품 객체 재귀 탐색"""
     if found is None:
         found = []
 
     if isinstance(obj, dict):
-        # 위버스샵 상품 객체 특징: saleId 또는 id + name + price 관련 필드
-        has_id = "saleId" in obj or ("id" in obj and isinstance(obj.get("id"), int))
-        has_name = "name" in obj and isinstance(obj.get("name"), str)
-        has_price = any(k in obj for k in ("price", "salePrice", "originalPrice", "priceAmount"))
+        has_id = "saleId" in obj or ("id" in obj and isinstance(obj.get("id"), (int, str)))
+        has_name = ("name" in obj and isinstance(obj.get("name"), str)) or ("title" in obj and isinstance(obj.get("title"), str))
+        has_price = any(k in obj for k in ("price", "salePrice", "originalPrice", "priceAmount", "salePriceAmount"))
         if has_id and has_name and has_price:
             found.append(obj)
         for v in obj.values():
@@ -42,8 +40,9 @@ def find_products_in_json(obj, found=None):
 
 def normalize_product(raw: dict, base_url: str, artist_id: str, currency: str) -> dict:
     sale_id = raw.get("saleId") or raw.get("id")
-    # 가격 추출 (다양한 구조 대응)
-    price_val = raw.get("price") or raw.get("salePrice") or raw.get("priceAmount")
+    name = (raw.get("name") or raw.get("title") or "").strip()
+
+    price_val = raw.get("salePrice") or raw.get("price") or raw.get("priceAmount") or raw.get("salePriceAmount")
     if isinstance(price_val, dict):
         price_val = price_val.get("amount") or price_val.get("value") or price_val.get("salePrice")
 
@@ -51,24 +50,22 @@ def normalize_product(raw: dict, base_url: str, artist_id: str, currency: str) -
     if isinstance(orig_price, dict):
         orig_price = orig_price.get("amount") or orig_price.get("value")
 
-    # 품절 / 재고 상태 판단
     status = str(raw.get("status") or raw.get("saleStatus") or "").upper()
     is_sold_out = bool(raw.get("isSoldOut") or raw.get("soldOut") or "SOLD_OUT" in status or "SOLDOUT" in status)
 
-    # 이미지 추출
-    img = raw.get("thumbnailUrl") or raw.get("imageUrl") or raw.get("image") or ""
+    img = raw.get("thumbnailUrl") or raw.get("imageUrl") or raw.get("image") or raw.get("thumbnailImageUrl") or ""
     if isinstance(raw.get("images"), list) and raw["images"] and not img:
         first = raw["images"][0]
         img = first.get("url") if isinstance(first, dict) else str(first)
 
     product_url = f"https://shop.weverse.io/en/shop/{currency}/artists/{artist_id}/sales/{sale_id}"
     if base_url and "/artists/" in base_url:
-        prefix = base_url.split("/sales/")[0].split("/categories/")[0]
+        prefix = base_url.split("/sales/")[0].split("/categories/")[0].split("?")[0]
         product_url = f"{prefix}/sales/{sale_id}"
 
     return {
         "saleId": sale_id,
-        "name": raw.get("name", "").strip(),
+        "name": name,
         "price": price_val,
         "originalPrice": orig_price,
         "currency": currency,
@@ -81,8 +78,7 @@ def normalize_product(raw: dict, base_url: str, artist_id: str, currency: str) -
     }
 
 
-async def scrape_dom_fallback(page, base_url: str, artist_id: str, currency: str) -> list:
-    """JSON 탐색 실패 시 실제 렌더링된 DOM에서 상품 카드 직접 추출"""
+async def scrape_dom_fallback(page, artist_id: str, currency: str) -> list:
     items = []
     links = await page.query_selector_all('a[href*="/sales/"]')
     seen_ids = set()
@@ -122,6 +118,107 @@ async def scrape_dom_fallback(page, base_url: str, artist_id: str, currency: str
     return items
 
 
+async def run_browser_scrape(target_url: str, artist_id: str, currency: str, max_items: int, include_details: bool, proxy_url: str | None):
+    captured_api_jsons = []
+
+    async with async_playwright() as p:
+        launch_opts = {
+            "headless": True,
+            "args": ["--disable-blink-features=AutomationControlled"],
+        }
+        if proxy_url:
+            launch_opts["proxy"] = {"server": proxy_url}
+
+        browser = await p.chromium.launch(**launch_opts)
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 900},
+            locale="en-US",
+        )
+        page = await context.new_page()
+
+        # 백엔드 XHR/Fetch API JSON 응답 자동 가로채기
+        async def handle_response(response):
+            try:
+                ct = response.headers.get("content-type", "")
+                if "application/json" in ct and response.status == 200:
+                    url_l = response.url.lower()
+                    if any(k in url_l for k in ("sale", "product", "artist", "display", "shop", "catalog")):
+                        data = await response.json()
+                        captured_api_jsons.append((response.url, data))
+            except Exception:
+                pass
+
+        page.on("response", handle_response)
+
+        response = await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+        status_code = response.status if response else 0
+        await page.wait_for_timeout(4000)
+
+        final_url = page.url
+        title = await page.title()
+        Actor.log.info(f"🌐 Status: {status_code} | Final URL: {final_url} | Title: {title}")
+
+        # 안전한 스크롤 (document.body가 null이어도 절대 죽지 않음)
+        for _ in range(3):
+            await page.evaluate(
+                "() => { const h = document.documentElement?.scrollHeight || document.body?.scrollHeight || 0; if (h > 0) window.scrollTo(0, h); }"
+            )
+            await page.wait_for_timeout(1500)
+
+        html_text = await page.content()
+        products_map = {}
+
+        # 1순위: 가로챈 API JSON에서 상품 찾기
+        for api_url, json_data in captured_api_jsons:
+            for raw in find_products_in_json(json_data):
+                norm = normalize_product(raw, final_url, artist_id, currency)
+                if norm["saleId"] and norm["name"]:
+                    products_map[str(norm["saleId"])] = norm
+
+        # 2순위: __NEXT_DATA__에서 상품 찾기
+        if not products_map:
+            next_data = extract_next_data(html_text)
+            for raw in find_products_in_json(next_data):
+                norm = normalize_product(raw, final_url, artist_id, currency)
+                if norm["saleId"] and norm["name"]:
+                    products_map[str(norm["saleId"])] = norm
+
+        # 3순위: 화면 DOM 링크에서 직접 추출
+        if not products_map:
+            dom_items = await scrape_dom_fallback(page, artist_id, currency)
+            for item in dom_items:
+                products_map[str(item["saleId"])] = item
+
+        # 실패 시 디버깅용 HTML 일부 로그 출력
+        if not products_map:
+            snippet = re.sub(r"\s+", " ", html_text[:600])
+            Actor.log.warning(f"⚠️ 상품 0개 발견. HTML 미리보기: {snippet}")
+            Actor.log.info(f"📡 가로챈 JSON API 개수: {len(captured_api_jsons)}")
+
+        results = list(products_map.values())
+        if max_items > 0:
+            results = results[:max_items]
+
+        if include_details and results:
+            for idx, item in enumerate(results):
+                try:
+                    await page.goto(item["productUrl"], wait_until="domcontentloaded", timeout=25000)
+                    await page.wait_for_timeout(1000)
+                    d_html = await page.content()
+                    d_json = extract_next_data(d_html)
+                    for dr in find_products_in_json(d_json):
+                        if str(dr.get("saleId") or dr.get("id")) == str(item["saleId"]):
+                            enriched = normalize_product(dr, item["productUrl"], artist_id, currency)
+                            item.update({k: v for k, v in enriched.items() if v not in (None, "")})
+                            break
+                except Exception as e:
+                    Actor.log.warning(f"상세 건너뜀 ({item['saleId']}): {e}")
+
+        await browser.close()
+        return results, status_code
+
+
 async def main() -> None:
     async with Actor:
         actor_input = await Actor.get_input() or {}
@@ -137,75 +234,20 @@ async def main() -> None:
         if m_art:
             artist_id = m_art.group(1)
 
-        Actor.log.info(f"🚀 Scraping Weverse Shop URL: {target_url}")
+        Actor.log.info(f"🚀 Scraping Weverse Shop: {target_url}")
 
-        # Apify 프록시 설정 (실행 시 차단 방지)
-        proxy_config = await Actor.create_proxy_configuration()
-        proxy_url = await proxy_config.new_url() if proxy_config else None
+        # 1차: 프록시 없이 빠른 직접 접속 시도 (차단 시 프록시로 자동 전환)
+        results, status_code = await run_browser_scrape(target_url, artist_id, currency, max_items, include_details, None)
 
-        async with async_playwright() as p:
-            launch_opts = {"headless": True}
+        if not results:
+            Actor.log.info("🔄 직접 접속 결과 0건 → Apify 프록시로 재시도합니다...")
+            proxy_config = await Actor.create_proxy_configuration()
+            proxy_url = await proxy_config.new_url() if proxy_config else None
             if proxy_url:
-                launch_opts["proxy"] = {"server": proxy_url}
+                results, status_code = await run_browser_scrape(target_url, artist_id, currency, max_items, include_details, proxy_url)
 
-            browser = await p.chromium.launch(**launch_opts)
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-                locale="en-US",
-            )
-            page = await context.new_page()
-
-            await page.goto(target_url, wait_until="networkidle", timeout=60000)
-            await page.wait_for_timeout(2000)
-
-            # 스크롤하여 동적 상품 로딩
-            for _ in range(3):
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(1200)
-
-            html_text = await page.content()
-            next_data = extract_next_data(html_text)
-            raw_products = find_products_in_json(next_data)
-
-            products_map = {}
-            for raw in raw_products:
-                norm = normalize_product(raw, target_url, artist_id, currency)
-                if norm["saleId"] and norm["name"]:
-                    products_map[norm["saleId"]] = norm
-
-            if not products_map:
-                Actor.log.info("ℹ️ __NEXT_DATA__에서 상품을 찾지 못해 DOM 폴백 추출을 실행합니다.")
-                dom_items = await scrape_dom_fallback(page, target_url, artist_id, currency)
-                for item in dom_items:
-                    products_map[item["saleId"]] = item
-
-            results = list(products_map.values())
-            if max_items > 0:
-                results = results[:max_items]
-
-            Actor.log.info(f"📦 총 {len(results)}개 상품 발견! 세부 정보 보강 여부: {include_details}")
-
-            if include_details and results:
-                for idx, item in enumerate(results):
-                    try:
-                        await page.goto(item["productUrl"], wait_until="domcontentloaded", timeout=30000)
-                        await page.wait_for_timeout(800)
-                        detail_html = await page.content()
-                        detail_json = extract_next_data(detail_html)
-                        detail_raws = find_products_in_json(detail_json)
-                        for dr in detail_raws:
-                            if str(dr.get("saleId") or dr.get("id")) == str(item["saleId"]):
-                                enriched = normalize_product(dr, item["productUrl"], artist_id, currency)
-                                item.update({k: v for k, v in enriched.items() if v not in (None, "")})
-                                break
-                    except Exception as e:
-                        Actor.log.warning(f"상세 페이지 건너뜀 ({item['saleId']}): {e}")
-
-                    await Actor.push_data(item)
-                    if (idx + 1) % 10 == 0:
-                        Actor.log.info(f"✅ 진행률: {idx + 1}/{len(results)}개 저장 완료")
-            else:
-                await Actor.push_data(results)
-
-            await browser.close()
+        if results:
+            await Actor.push_data(results)
             Actor.log.info(f"🎉 완료! 총 {len(results)}개 상품 추출 성공.")
+        else:
+            Actor.log.warning("❌ 상품을 찾지 못했습니다. 위 Status 및 HTML 미리보기 로그를 확인해 주세요.")
