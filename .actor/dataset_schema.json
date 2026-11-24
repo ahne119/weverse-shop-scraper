@@ -1,0 +1,51 @@
+{
+  "actorSpecification": 1,
+  "fields": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "saleId": { "type": "integer" },
+      "name": { "type": "string" },
+      "price": { "type": "number" },
+      "originalPrice": { "type": "number" },
+      "currency": { "type": "string" },
+      "isSoldOut": { "type": "boolean" },
+      "stockStatus": { "type": "string" },
+      "category": { "type": "string" },
+      "label": { "type": "string" },
+      "imageUrl": { "type": "string" },
+      "productUrl": { "type": "string" },
+      "artistId": { "type": "string" }
+    }
+  },
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "transformation": {
+        "fields": [
+          "imageUrl",
+          "name",
+          "price",
+          "currency",
+          "isSoldOut",
+          "stockStatus",
+          "category",
+          "productUrl"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "imageUrl": { "label": "Image", "format": "image" },
+          "name": { "label": "Product Name", "format": "text" },
+          "price": { "label": "Price", "format": "number" },
+          "currency": { "label": "Currency", "format": "text" },
+          "isSoldOut": { "label": "Sold Out", "format": "boolean" },
+          "stockStatus": { "label": "Stock Status", "format": "text" },
+          "category": { "label": "Category", "format": "text" },
+          "productUrl": { "label": "Product URL", "format": "link" }
+        }
+      }
+    }
+  }
+}

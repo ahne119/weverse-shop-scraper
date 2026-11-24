@@ -1,0 +1,11 @@
+{
+  "actorOutputSchemaVersion": 1,
+  "title": "Weverse Shop Scraper Output",
+  "properties": {
+    "products": {
+      "type": "string",
+      "title": "Scraped Products Dataset",
+      "template": "{{links.apiDefaultDatasetUrl}}/items"
+    }
+  }
+}
