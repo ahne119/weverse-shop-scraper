@@ -115,9 +115,22 @@ async def scrape_dom_fallback(page, artist_id: str, currency: str, category_name
     return items
 
 
+async def safe_goto(page, url: str, timeout: int = 45000):
+    """일시적인 네트워크 변경/끊김 시 최대 3번 자동 재시도"""
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            return await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+        except Exception as e:
+            last_err = e
+            Actor.log.warning(f"⚠️ 페이지 이동 재시도 ({attempt}/3): {e}")
+            await page.wait_for_timeout(1500)
+    raise last_err
+
+
 async def collect_from_page(page, url: str, artist_id: str, currency: str, captured_api_jsons: list, products_map: dict, category_name: str = ""):
     captured_api_jsons.clear()
-    await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+    await safe_goto(page, url, timeout=45000)
     await page.wait_for_timeout(2500)
 
     for _ in range(3):
@@ -154,7 +167,14 @@ async def run_browser_scrape(target_url: str, artist_id: str, currency: str, max
     pushed_count = 0
 
     async with async_playwright() as p:
-        launch_opts = {"headless": True, "args": ["--disable-blink-features=AutomationControlled"]}
+        launch_opts = {
+            "headless": True,
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+            ],
+        }
         if proxy_url:
             launch_opts["proxy"] = {"server": proxy_url}
 
@@ -200,8 +220,11 @@ async def run_browser_scrape(target_url: str, artist_id: str, currency: str, max
             for cat_url, cat_name in cat_urls[:12]:
                 if max_items > 0 and len(products_map) >= max_items:
                     break
-                await collect_from_page(page, cat_url, artist_id, currency, captured_api_jsons, products_map, cat_name)
-                Actor.log.info(f"   └ [{cat_name}] 누적 상품: {len(products_map)}개")
+                try:
+                    await collect_from_page(page, cat_url, artist_id, currency, captured_api_jsons, products_map, cat_name)
+                    Actor.log.info(f"   └ [{cat_name}] 누적 상품: {len(products_map)}개")
+                except Exception as cat_err:
+                    Actor.log.warning(f"카테고리 건너뜀 ({cat_name}): {cat_err}")
 
         results = list(products_map.values())
         if max_items > 0:
@@ -255,10 +278,15 @@ async def main() -> None:
             artist_id = m_art.group(1)
 
         Actor.log.info(f"🚀 Scraping Weverse Shop: {target_url}")
-        pushed_count = await run_browser_scrape(target_url, artist_id, currency, max_items, include_details, None)
+        pushed_count = 0
+
+        try:
+            pushed_count = await run_browser_scrape(target_url, artist_id, currency, max_items, include_details, None)
+        except Exception as direct_err:
+            Actor.log.warning(f"⚠️ 직접 접속 오류 ({direct_err}) → 프록시로 자동 전환합니다.")
 
         if pushed_count == 0:
-            Actor.log.info("🔄 직접 접속 결과 0건 → Apify 프록시로 재시도합니다...")
+            Actor.log.info("🔄 Apify 프록시로 재시도합니다...")
             proxy_config = await Actor.create_proxy_configuration()
             proxy_url = await proxy_config.new_url() if proxy_config else None
             if proxy_url:
