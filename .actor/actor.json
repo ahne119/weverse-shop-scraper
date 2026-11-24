@@ -1,0 +1,12 @@
+{
+  "actorSpecification": 1,
+  "name": "weverse-shop-scraper",
+  "title": "Weverse Shop Scraper (K-Pop Merch, Prices & Stock)",
+  "description": "Extract K-Pop official merch, albums, prices (USD/KRW/JPY), sold-out stock status, images, and product links from Weverse Shop.",
+  "version": "1.0",
+  "meta": {
+    "templateId": "python-start"
+  },
+  "input": "./input_schema.json",
+  "dockerfile": "../Dockerfile"
+}

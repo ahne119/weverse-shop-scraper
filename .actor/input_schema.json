@@ -1,0 +1,62 @@
+{
+  "title": "Weverse Shop Scraper Input",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "artistId": {
+      "title": "Artist Store",
+      "type": "string",
+      "description": "Select a K-Pop artist store on Weverse Shop (or enter any numeric artistId).",
+      "default": "2",
+      "editor": "select",
+      "enum": ["2", "3", "7", "10", "50", "82", "148", "152"],
+      "enumTitles": [
+        "BTS (2)",
+        "TOMORROW X TOGETHER (3)",
+        "SEVENTEEN (7)",
+        "ENHYPEN (10)",
+        "LE SSERAFIM (50)",
+        "NewJeans (82)",
+        "ILLIT (148)",
+        "KATSEYE (152)"
+      ]
+    },
+    "customArtistUrl": {
+      "title": "Or Custom Weverse Shop URL (Optional)",
+      "type": "string",
+      "description": "If provided, scrapes this exact Weverse Shop artist/category URL instead of the dropdown above (e.g. https://shop.weverse.io/en/shop/USD/artists/7).",
+      "editor": "textfield"
+    },
+    "currency": {
+      "title": "Currency / Shop Region",
+      "type": "string",
+      "description": "Currency displayed on Weverse Shop.",
+      "default": "USD",
+      "editor": "select",
+      "enum": ["USD", "KRW", "JPY"],
+      "enumTitles": ["USD ($) - Global", "KRW (₩) - Korea", "JPY (¥) - Japan"]
+    },
+    "language": {
+      "title": "Language",
+      "type": "string",
+      "default": "en",
+      "editor": "select",
+      "enum": ["en", "ko", "ja"],
+      "enumTitles": ["English (en)", "Korean (ko)", "Japanese (ja)"]
+    },
+    "maxItems": {
+      "title": "Max Products to Scrape",
+      "type": "integer",
+      "description": "Maximum number of products to extract (0 = all found on page/categories).",
+      "default": 50,
+      "minimum": 1,
+      "maximum": 500
+    },
+    "includeProductDetails": {
+      "title": "Fetch Detailed Stock & Badges",
+      "type": "boolean",
+      "description": "Visit individual product pages for exact stock status, badges, and description (slower, uses more compute).",
+      "default": true
+    }
+  }
+}
