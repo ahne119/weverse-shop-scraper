@@ -6,7 +6,7 @@
     "artistId": {
       "title": "Artist Store",
       "type": "string",
-      "description": "Select a K-Pop artist store on Weverse Shop (or enter any numeric artistId).",
+      "description": "Select a K-Pop artist store on Weverse Shop.",
       "default": "2",
       "editor": "select",
       "enum": ["2", "3", "7", "10", "50", "82", "148", "152"],
@@ -39,6 +39,7 @@
     "language": {
       "title": "Language",
       "type": "string",
+      "description": "Language of the Weverse Shop pages to scrape.",
       "default": "en",
       "editor": "select",
       "enum": ["en", "ko", "ja"],
@@ -47,7 +48,7 @@
     "maxItems": {
       "title": "Max Products to Scrape",
       "type": "integer",
-      "description": "Maximum number of products to extract (0 = all found on page/categories).",
+      "description": "Maximum number of products to extract.",
       "default": 50,
       "minimum": 1,
       "maximum": 500
