@@ -1,10 +1,61 @@
-import asyncio
 import json
 import re
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from apify import Actor
 from playwright.async_api import async_playwright
+
+
+def pick_first_not_none(d: dict, *keys):
+    for k in keys:
+        if k in d and d[k] is not None:
+            return d[k]
+    return None
+
+
+def to_sale_id(val):
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, int):
+        return val
+    s = str(val).strip()
+    if s.isdigit():
+        return int(s)
+    return s or None
+
+
+def to_float(val):
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, dict):
+        nested = pick_first_not_none(val, "amount", "value", "salePrice", "price")
+        return to_float(nested)
+    if isinstance(val, str):
+        cleaned = re.sub(r"[^\d.]", "", val.replace(",", ""))
+        if not cleaned or cleaned.count(".") > 1:
+            return None
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
+
+
+def to_str(val) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, str):
+        return val.strip()
+    if isinstance(val, dict):
+        for k in ("text", "name", "label", "title", "url", "value"):
+            if k in val and val[k] is not None:
+                return to_str(val[k])
+        return json.dumps(val, ensure_ascii=False)
+    if isinstance(val, list):
+        return ", ".join(filter(None, (to_str(x) for x in val)))
+    return str(val).strip()
 
 
 def extract_next_data(html_text: str) -> dict:
@@ -36,43 +87,43 @@ def find_products_in_json(obj, found=None):
 
 
 def normalize_product(raw: dict, base_url: str, artist_id: str, currency: str, category_name: str = "") -> dict:
-    sale_id = raw.get("saleId") or raw.get("id")
-    name = (raw.get("name") or raw.get("title") or "").strip()
+    sale_id = to_sale_id(pick_first_not_none(raw, "saleId", "id"))
+    name = to_str(pick_first_not_none(raw, "name", "title"))
 
-    price_val = raw.get("salePrice") or raw.get("price") or raw.get("priceAmount") or raw.get("salePriceAmount")
-    if isinstance(price_val, dict):
-        price_val = price_val.get("amount") or price_val.get("value") or price_val.get("salePrice")
+    raw_price = pick_first_not_none(raw, "salePrice", "price", "priceAmount", "salePriceAmount")
+    price_val = to_float(raw_price)
 
-    orig_price = raw.get("originalPrice")
-    if isinstance(orig_price, dict):
-        orig_price = orig_price.get("amount") or orig_price.get("value")
+    raw_orig = pick_first_not_none(raw, "originalPrice")
+    orig_price = to_float(raw_orig)
 
-    status = str(raw.get("status") or raw.get("saleStatus") or "").upper()
+    status = to_str(pick_first_not_none(raw, "status", "saleStatus")).upper()
     is_sold_out = bool(raw.get("isSoldOut") or raw.get("soldOut") or "SOLD_OUT" in status or "SOLDOUT" in status)
 
-    img = raw.get("thumbnailUrl") or raw.get("imageUrl") or raw.get("image") or raw.get("thumbnailImageUrl") or ""
+    img = to_str(pick_first_not_none(raw, "thumbnailUrl", "imageUrl", "image", "thumbnailImageUrl"))
     if isinstance(raw.get("images"), list) and raw["images"] and not img:
-        first = raw["images"][0]
-        img = first.get("url") if isinstance(first, dict) else str(first)
+        img = to_str(raw["images"][0])
 
     product_url = f"https://shop.weverse.io/en/shop/{currency}/artists/{artist_id}/sales/{sale_id}"
     if base_url and "/artists/" in base_url:
         prefix = base_url.split("/sales/")[0].split("/categories/")[0].split("?")[0]
         product_url = f"{prefix}/sales/{sale_id}"
 
+    cat_str = to_str(category_name) or to_str(raw.get("categoryName"))
+    label_str = to_str(pick_first_not_none(raw, "label", "badge"))
+
     return {
         "saleId": sale_id,
         "name": name,
         "price": price_val,
         "originalPrice": orig_price,
-        "currency": currency,
+        "currency": to_str(currency),
         "isSoldOut": is_sold_out,
         "stockStatus": "SOLD_OUT" if is_sold_out else (status or "IN_STOCK"),
-        "category": category_name or raw.get("categoryName") or "",
-        "label": raw.get("label") or raw.get("badge") or "",
+        "category": cat_str,
+        "label": label_str,
         "imageUrl": img,
         "productUrl": product_url,
-        "artistId": artist_id,
+        "artistId": to_str(artist_id),
     }
 
 
@@ -100,22 +151,22 @@ async def scrape_dom_fallback(page, artist_id: str, currency: str, category_name
 
         items.append({
             "saleId": sale_id,
-            "name": name_line,
-            "price": price_line,
+            "name": to_str(name_line),
+            "price": to_float(price_line),
             "originalPrice": None,
-            "currency": currency,
+            "currency": to_str(currency),
             "isSoldOut": is_sold_out,
             "stockStatus": "SOLD_OUT" if is_sold_out else "IN_STOCK",
-            "category": category_name,
+            "category": to_str(category_name),
             "label": "",
-            "imageUrl": img_url or "",
+            "imageUrl": to_str(img_url),
             "productUrl": urljoin("https://shop.weverse.io", href),
-            "artistId": artist_id,
+            "artistId": to_str(artist_id),
         })
     return items
 
 
-async def safe_goto(page, url: str, timeout: int = 45000):
+async def safe_goto(page, url: str, timeout: int = 60000):
     """일시적인 네트워크 변경/끊김 시 최대 3번 자동 재시도"""
     last_err = None
     for attempt in range(1, 4):
@@ -130,7 +181,7 @@ async def safe_goto(page, url: str, timeout: int = 45000):
 
 async def collect_from_page(page, url: str, artist_id: str, currency: str, captured_api_jsons: list, products_map: dict, category_name: str = ""):
     captured_api_jsons.clear()
-    await safe_goto(page, url, timeout=45000)
+    await safe_goto(page, url, timeout=60000)
     await page.wait_for_timeout(2500)
 
     for _ in range(3):
@@ -161,10 +212,27 @@ async def collect_from_page(page, url: str, artist_id: str, currency: str, captu
             products_map[str(item["saleId"])] = item
 
 
-async def run_browser_scrape(target_url: str, artist_id: str, currency: str, max_items: int, include_details: bool, proxy_url: str | None):
+async def push_results_safely(results: list) -> int:
+    if not results:
+        return 0
+    try:
+        await Actor.push_data(results)
+        return len(results)
+    except Exception as batch_err:
+        Actor.log.warning(f"⚠️ 일괄 저장 실패 ({batch_err}) → 개별 저장으로 전환합니다.")
+        pushed = 0
+        for item in results:
+            try:
+                await Actor.push_data(item)
+                pushed += 1
+            except Exception as item_err:
+                Actor.log.warning(f"⚠️ 항목 저장 건너뜀 (saleId={item.get('saleId')}): {item_err}")
+        return pushed
+
+
+async def run_browser_scrape(target_url: str, artist_id: str, currency: str, max_items: int, include_details: bool, proxy_url: str | None) -> list:
     captured_api_jsons = []
     products_map = {}
-    pushed_count = 0
 
     async with async_playwright() as p:
         launch_opts = {
@@ -230,11 +298,7 @@ async def run_browser_scrape(target_url: str, artist_id: str, currency: str, max
         if max_items > 0:
             results = results[:max_items]
 
-        if not results:
-            await browser.close()
-            return 0
-
-        if include_details:
+        if include_details and results:
             Actor.log.info(f"🔎 상세 페이지 보강 시작 ({len(results)}개)...")
             for idx, item in enumerate(results):
                 try:
@@ -250,16 +314,11 @@ async def run_browser_scrape(target_url: str, artist_id: str, currency: str, max
                 except Exception as e:
                     Actor.log.warning(f"상세 건너뜀 ({item['saleId']}): {e}")
 
-                await Actor.push_data(item)
-                pushed_count += 1
                 if (idx + 1) % 10 == 0:
-                    Actor.log.info(f"   ✅ 상세 진행률: {idx + 1}/{len(results)}개 저장 완료")
-        else:
-            await Actor.push_data(results)
-            pushed_count = len(results)
+                    Actor.log.info(f"   ✅ 상세 보강 진행률: {idx + 1}/{len(results)}개")
 
         await browser.close()
-        return pushed_count
+        return results
 
 
 async def main() -> None:
@@ -268,7 +327,8 @@ async def main() -> None:
         artist_id = str(actor_input.get("artistId", "2")).strip()
         currency = str(actor_input.get("currency", "USD")).strip()
         language = str(actor_input.get("language", "en")).strip()
-        max_items = int(actor_input.get("maxItems", 50) or 50)
+        max_items_raw = actor_input.get("maxItems", 50)
+        max_items = 50 if max_items_raw is None else int(max_items_raw)
         custom_url = (actor_input.get("customArtistUrl") or "").strip()
         include_details = bool(actor_input.get("includeProductDetails", False))
 
@@ -278,19 +338,21 @@ async def main() -> None:
             artist_id = m_art.group(1)
 
         Actor.log.info(f"🚀 Scraping Weverse Shop: {target_url}")
-        pushed_count = 0
+        results = []
 
         try:
-            pushed_count = await run_browser_scrape(target_url, artist_id, currency, max_items, include_details, None)
+            results = await run_browser_scrape(target_url, artist_id, currency, max_items, include_details, None)
         except Exception as direct_err:
             Actor.log.warning(f"⚠️ 직접 접속 오류 ({direct_err}) → 프록시로 자동 전환합니다.")
 
-        if pushed_count == 0:
+        if not results:
             Actor.log.info("🔄 Apify 프록시로 재시도합니다...")
             proxy_config = await Actor.create_proxy_configuration()
             proxy_url = await proxy_config.new_url() if proxy_config else None
             if proxy_url:
-                pushed_count = await run_browser_scrape(target_url, artist_id, currency, max_items, include_details, proxy_url)
+                results = await run_browser_scrape(target_url, artist_id, currency, max_items, include_details, proxy_url)
+
+        pushed_count = await push_results_safely(results)
 
         if pushed_count > 0:
             try:

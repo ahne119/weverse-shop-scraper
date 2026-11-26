@@ -4,18 +4,18 @@
     "$schema": "http://json-schema.org/draft-07/schema#",
     "type": "object",
     "properties": {
-      "saleId": { "type": "integer" },
-      "name": { "type": "string" },
-      "price": { "type": "number" },
-      "originalPrice": { "type": "number" },
-      "currency": { "type": "string" },
-      "isSoldOut": { "type": "boolean" },
-      "stockStatus": { "type": "string" },
-      "category": { "type": "string" },
-      "label": { "type": "string" },
-      "imageUrl": { "type": "string" },
-      "productUrl": { "type": "string" },
-      "artistId": { "type": "string" }
+      "saleId": { "type": ["integer", "string"] },
+      "name": { "type": ["string", "null"] },
+      "price": { "type": ["number", "null"] },
+      "originalPrice": { "type": ["number", "null"] },
+      "currency": { "type": ["string", "null"] },
+      "isSoldOut": { "type": ["boolean", "null"] },
+      "stockStatus": { "type": ["string", "null"] },
+      "category": { "type": ["string", "null"] },
+      "label": { "type": ["string", "null"] },
+      "imageUrl": { "type": ["string", "null"] },
+      "productUrl": { "type": ["string", "null"] },
+      "artistId": { "type": ["string", "null"] }
     }
   },
   "views": {
